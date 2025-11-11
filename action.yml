@@ -1,0 +1,255 @@
+name: "Twyn action"
+description: "Security tool against dependency typosquatting attacks"
+author: "Elements Interactive"
+
+branding:
+  icon: "search"
+  color: "blue"
+
+inputs:
+  github-token:
+    description: "Token needed to publish results to the PR."
+    required: false
+
+  config:
+    description: "Path to the config file"
+    required: false
+
+  dependency-file:
+    description: "Dependency file(s) to analyze. Comma-separated if multiple. By default, twyn will search in the current directory for supported files, but this option will override that behavior."
+    required: false
+
+  selector-method:
+    description: "Which method twyn should use to select possible typosquats. 'first-letter' only compares dependencies that share the first letter, 'nearby-letter' compares against dependencies whose first letter is nearby in an English keyboard. 'all' compares the given dependencies against all of those in the reference."
+    required: false
+
+  no-track:
+    description: "Do not show the progress bar while processing packages"
+    required: false
+    default: "false"
+
+  json:
+    description: "Display the results in json format. It implies no-track. Mutually exclusive with --table."
+    required: false
+    default: "false"
+
+  table:
+    description: "Display the results in a table format. It implies no-track. Mutually exclusive with --json."
+    required: false
+    default: "false"
+
+  recursive:
+    description: "Recursively look for files when trying to locate them automatically. Ignored if dependency-file is given."
+    required: false
+    default: "false"
+
+  pypi-source:
+    description: "Alternative PyPI source URL to use for fetching trusted packages"
+    required: false
+
+  npm-source:
+    description: "Alternative npm source URL to use for fetching trusted packages"
+    required: false
+
+  v:
+    description: "Enable verbose output (-v)"
+    required: false
+    default: "false"
+
+  vv:
+    description: "Enable extra verbose output (-vv)"
+    required: false
+    default: "false"
+
+  version:
+    description: "Twyn version (latest, v1.0.0, etc.)"
+    required: false
+    default: "latest"
+
+  publish:
+    description: "Whether to publish the twyn results as PR comments (requires table format)"
+    required: false
+    default: "false"
+
+outputs:
+  results:
+    description: "Raw output from twyn scan"
+    value: ${{ steps.twyn-scan.outputs.results }}
+  exit-code:
+    description: "Exit code from twyn scan"
+    value: ${{ steps.twyn-scan.outputs.exit-code }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run Twyn Security Check
+      id: twyn-scan
+      shell: bash
+      run: |
+        # Validate input combinations
+        if [ "${{ inputs.publish }}" = "true" ] && [ "${{ inputs.json }}" = "true" ]; then
+          echo "❌ Error: 'publish' and 'json' cannot be used together."
+          echo "   Publishing requires table format, but JSON format was requested."
+          echo "   Please use either 'publish: true' with 'table: true' or use 'json: true' without publishing."
+          exit 1
+        fi
+
+        if [ "${{ inputs.json }}" = "true" ] && [ "${{ inputs.table }}" = "true" ]; then
+          echo "❌ Error: 'json' and 'table' are mutually exclusive."
+          echo "   Please choose either JSON or table format, not both."
+          exit 1
+        fi
+
+
+        # Build arguments as an array for safety (avoids word-splitting issues)
+        ARGS=()
+
+        # Optional config file
+        if [ -n "${{ inputs.config }}" ]; then
+          ARGS+=(--config "${{ inputs.config }}")
+        fi
+
+        # Dependency files (multiple allowed)
+        if [ -n "${{ inputs.dependency-file }}" ]; then
+          IFS=',' read -ra DEPENDENCY_FILES <<< "${{ inputs.dependency-file }}"
+          for file in "${DEPENDENCY_FILES[@]}"; do
+            if [ -n "$file" ]; then
+              ARGS+=(--dependency-file "$file")
+            fi
+          done
+        fi
+
+        # Selector method
+        if [ -n "${{ inputs.selector-method }}" ]; then
+          ARGS+=(--selector-method "${{ inputs.selector-method }}")
+        fi
+
+        # Boolean flags
+
+        if [ "${{ inputs.no-track }}" = "true" ]; then
+          ARGS+=(--no-track)
+        fi
+
+        if [ "${{ inputs.json }}" = "true" ]; then
+          ARGS+=(--json)
+        fi
+
+        # Force table format when publishing
+        if [ "${{ inputs.publish }}" = "true" ] || [ "${{ inputs.table }}" = "true" ]; then
+          VERSION="${{ inputs.version }}"
+          # Check if version is in format vX.Y.Z or just latest
+          if [[ "$VERSION" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+            # Extract version number (remove 'v' prefix)
+            VERSION_NUM=${VERSION#v}
+            MAJOR_VERSION=$(echo "$VERSION_NUM" | cut -d. -f1)
+            if [ "$MAJOR_VERSION" -lt 6 ]; then
+              echo "❌ Error: Table format requires Twyn version >= v6."
+              echo "   Current version: $VERSION"
+              echo "   Please set 'version: \"v6\"' or higher to use table format and to publish to a PR."
+              exit 1
+            fi
+          elif [ "$VERSION" != "latest" ]; then
+            echo "❌ Error: Invalid version format '$VERSION'."
+            echo "   Expected format: 'vX.Y.Z' (e.g., 'v6.0.0') or 'latest'."
+            echo "   Table format and publishing require version >= v6."
+            exit 1
+          fi
+          
+          # If the check was successful, add the table arg
+          ARGS+=(--table)
+        fi
+
+        if [ "${{ inputs.recursive }}" = "true" ]; then
+          ARGS+=(--recursive)
+        fi
+
+        # Source URLs
+        if [ -n "${{ inputs.pypi-source }}" ]; then
+          ARGS+=(--pypi-source "${{ inputs.pypi-source }}")
+        fi
+
+        if [ -n "${{ inputs.npm-source }}" ]; then
+          ARGS+=(--npm-source "${{ inputs.npm-source }}")
+        fi
+
+        # Verbose mode
+        if [ "${{ inputs.vv }}" = "true" ]; then
+          ARGS+=(-vv)
+        elif [ "${{ inputs.v }}" = "true" ]; then
+          ARGS+=(-v)
+        fi
+
+
+        # Run twyn using Docker and capture output and exit code
+        # Use 'set +e' to prevent script from exiting on non-zero exit codes
+        set +e
+        TWYN_OUTPUT=$(docker run --rm \
+          -v "${{ github.workspace }}:/results" \
+          -w /results \
+          elementsinteractive/twyn:${{ inputs.version }} run \
+          "${ARGS[@]}" 2>/dev/null)
+        TWYN_EXIT_CODE=$?
+        set -e
+
+        # Display output in action logs
+        echo "$TWYN_OUTPUT"
+
+        # Set action outputs
+        echo "results<<EOF" >> $GITHUB_OUTPUT
+        echo "$TWYN_OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        echo "exit-code=$TWYN_EXIT_CODE" >> $GITHUB_OUTPUT
+
+        # Create PR comment with twyn results
+        if [ "${{ inputs.publish }}" = "true" ] && [ $TWYN_EXIT_CODE -ge 1 ]; then
+          # Check if github-token is provided
+          if [ -z "${{ inputs.github-token }}" ]; then
+            echo "❌ Error: github-token is required when publish is enabled. Skipping..."
+            exit $TWYN_EXIT_CODE
+          fi
+          
+          # Check if we're in a Pull Request context
+          if [ "${{ github.event_name }}" != "pull_request" ] || [ -z "${{ github.event.pull_request.number }}" ]; then
+            echo "❌ Error: Publishing the results to the PR only works in Pull Request context."
+            echo "   Current event: ${{ github.event_name }}"
+            echo "   To enable publishing, make sure your workflow is triggered by 'pull_request' events."
+            echo "   Example:"
+            echo "   on:"
+            echo "     pull_request:"
+            echo "       branches: [main]"
+            exit $TWYN_EXIT_CODE
+          fi
+          
+          # Create comment content with proper formatting
+          echo "## 🛡️ Twyn Detection Results" > comment.md
+          echo "" >> comment.md
+          echo '```' >> comment.md
+          # Process the output to handle escape sequences properly
+          echo "$TWYN_OUTPUT" | sed 's/\\n/\n/g' >> comment.md
+          echo '```' >> comment.md
+            
+          curl -X POST \
+            -H "Authorization: token ${{ inputs.github-token}}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d "$(cat comment.md | jq -Rs '{"body": .}')" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Successfully posted comment to PR"
+          else
+            echo "❌ Failed to post comment to PR"
+          fi
+
+        else
+          echo "ℹ️ Publish to PR is disabled (publish: ${{ inputs.publish }})"
+        fi
+
+        # Set final exit code for the action
+        # Exit with 0 if we're just reporting findings (exit code 1)
+        # Exit with the actual code for real errors (exit codes > 1)
+        if [ $TWYN_EXIT_CODE -gt 1 ]; then
+          exit $TWYN_EXIT_CODE
+        else
+          exit 0
+        fi

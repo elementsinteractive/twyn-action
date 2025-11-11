@@ -1,0 +1,23 @@
+# This workflow will check our code for having a proper format, as well as the commit message to meet the expected ones
+
+name: Lint
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint-commit:
+    runs-on: ubuntu-latest
+    name: "Lint commit message"
+    container:
+      image: commitizen/commitizen:4.8.3@sha256:08a078c52b368f85f34257a66e10645ee74d8cbe9b471930b80b2b4e95a9bd4a
+    steps:
+      - name: Check out
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Check commit message
+        run: |
+          git config --global --add safe.directory . 
+          cz check --rev-range HEAD
